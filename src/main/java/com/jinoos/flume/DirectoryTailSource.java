@@ -52,6 +52,7 @@ public class DirectoryTailSource extends AbstractSource implements
   private static final String CONFIG_FILE_PATTERN = "file-pattern";
   private static final String CONFIG_PARSER = "parser";
   private static final String CONFIG_KEEP_BUFFER_INTERVAL = "keep-buffer-interval";
+  private static final String CONFIG_FILE_MONITOR_SLEEP_TIME = "file-monitor-sleep-time";
 
   // group(0) : DateTime YYYY-MM-DD HH:ii:ss
   // group(1) : Severity
@@ -65,7 +66,7 @@ public class DirectoryTailSource extends AbstractSource implements
   private static final String DEFAULT_PARSER_MODULE_CLASS = "com.jinoos.flume.SingleLineParserModule";
 
   private static final long DEFAULT_KEEP_BUFFER_INTERVAL = 1000;
-  private static final int DEFAULT_FILE_MONITOR_SLEEP_TIME = 100;
+  private static final long DEFAULT_FILE_MONITOR_SLEEP_TIME = 500;
 
   private static final Logger logger = LoggerFactory
       .getLogger(DirectoryTailSource.class);
@@ -82,7 +83,11 @@ public class DirectoryTailSource extends AbstractSource implements
   private Future<?> future;
 
   private long keepBufferInterval;
+  private long fileMonitorSleepTime;
+
   DirectoryTailParserModulable parserModule;
+
+  private DefaultFileMonitor fileMonitor;
 
   /**
    * <PRE>
@@ -103,6 +108,9 @@ public class DirectoryTailSource extends AbstractSource implements
 
     keepBufferInterval = context.getLong(CONFIG_KEEP_BUFFER_INTERVAL,
         DEFAULT_KEEP_BUFFER_INTERVAL);
+
+    fileMonitorSleepTime = context.getLong(CONFIG_FILE_MONITOR_SLEEP_TIME,
+        DEFAULT_FILE_MONITOR_SLEEP_TIME);
 
     confDirs = context.getString(CONFIG_DIRS).trim();
     Preconditions.checkState(confDirs != null,
@@ -207,13 +215,14 @@ public class DirectoryTailSource extends AbstractSource implements
   @Override
   public void stop() {
     logger.info("Source Stopping..");
+    fileMonitor.stop();
+    sourceCounter.stop();
 
   }
 
   private class ExecRunnable implements Runnable, FileListener {
 
     private AbstractSource source;
-    private DefaultFileMonitor fileMonitor;
     private FileSystemManager fsManager;
     private Map<String, FileSet> fileSetMap;
 
@@ -296,7 +305,7 @@ public class DirectoryTailSource extends AbstractSource implements
 
       }
 
-      fileMonitor.setDelay(DEFAULT_FILE_MONITOR_SLEEP_TIME);
+      fileMonitor.setDelay(fileMonitorSleepTime);
       fileMonitor.start();
 
       while (true) {
@@ -436,20 +445,20 @@ public class DirectoryTailSource extends AbstractSource implements
     private void readMessage(FileSet fileSet) {
       try {
         String buffer;
-        while ((buffer = fileSet.getBufferedReader().readLine()) != null) {
+        while ((buffer = fileSet.readLine()) != null) {
           buffer += "\n";
           boolean isFirstLine = parserModule.isFirstLine(buffer);
           if (isFirstLine) {
             sendEvent(fileSet);
-            fileSet.getBufferList().add(buffer);
+            fileSet.appendLine(buffer);
             parserModule.parse(buffer, fileSet);
 
           } else {
-            if (fileSet.getBufferList().size() == 0) {
+            if (fileSet.getLineSize() == 0) {
               logger.debug("Wrong log format, " + buffer);
               continue;
             } else {
-              fileSet.getBufferList().add(buffer);
+              fileSet.appendLine(buffer);
               parserModule.parse(buffer, fileSet);
             }
           }
@@ -467,36 +476,33 @@ public class DirectoryTailSource extends AbstractSource implements
       if (fileSet.getBufferList().isEmpty())
         return;
 
-      List<String> bufferList = fileSet.getBufferList();
-
-      StringBuffer sb = new StringBuffer();
-
-      synchronized (bufferList) {
-
-        for (int i = 0; i < bufferList.size(); i++) {
-          sb.append(bufferList.get(i));
-        }
-
+      synchronized (fileSet) {
+        StringBuffer sb = fileSet.getAllLines();
         Event event = EventBuilder.withBody(String.valueOf(sb).getBytes(),
             fileSet.getHeaders());
         source.getChannelProcessor().processEvent(event);
         sourceCounter.incrementEventReceivedCount();
 
-        bufferList.clear();
-        fileSet.clearHeaders();
+        fileSet.clear();
       }
     }
 
     private void flushFileSetBuffer() {
       synchronized (fileSetMap) {
+        long cutLine = System.currentTimeMillis() - keepBufferInterval;
+
         for (Map.Entry<String, FileSet> entry : fileSetMap.entrySet()) {
-          if (entry.getValue().getBufferList().size() > 0) {
+
+          // If lastAppendTime is over than keepBufferInterval,
+          // then, the message will be flushed even not be catched
+          // new first line or last line. It's to prevent last message
+          // delay delevery.
+          if (entry.getValue().getLastAppendTime() < cutLine
+              && entry.getValue().getBufferList().size() > 0) {
             sendEvent(entry.getValue());
           }
         }
       }
     }
-
   }
-
 }

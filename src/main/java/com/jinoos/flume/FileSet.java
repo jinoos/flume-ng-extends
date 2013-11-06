@@ -13,13 +13,15 @@ import org.apache.commons.vfs2.FileObject;
 import org.apache.flume.Transaction;
 import org.apache.flume.source.AbstractSource;
 
-public class FileSet implements DirectoryTailHeader {
+public class FileSet {
   private AbstractSource source;
   private FileObject fileObject;
   private BufferedReader bufferedReader;
   private Transaction transaction;
   private List<String> bufferList;
   private Map<String, String> headers;
+  private long lastAppendTime;
+  private Long seq;
 
   public FileSet(AbstractSource source, FileObject fileObject)
       throws IOException {
@@ -36,6 +38,41 @@ public class FileSet implements DirectoryTailHeader {
     this.seq = 0L;
   }
 
+  public String readLine() throws IOException {
+    return bufferedReader.readLine();
+  }
+
+  public long getLastAppendTime() {
+    return lastAppendTime;
+  }
+
+  public void setLastAppendTime(long lastAppendTime) {
+    this.lastAppendTime = lastAppendTime;
+  }
+
+  public boolean appendLine(String buffer) {
+    boolean ret = bufferList.add(buffer);
+    if (ret) {
+      lastAppendTime = System.currentTimeMillis();
+    }
+
+    return ret;
+  }
+
+  public int getLineSize() {
+    return bufferList.size();
+  }
+
+  public StringBuffer getAllLines() {
+
+    StringBuffer sb = new StringBuffer();
+
+    for (int i = 0; i < bufferList.size(); i++) {
+      sb.append(bufferList.get(i));
+    }
+    return sb;
+  }
+
   public void setHeader(String key, String value) {
     headers.put(key, value);
   }
@@ -45,20 +82,14 @@ public class FileSet implements DirectoryTailHeader {
     return null;
   }
 
-  public void clearHeaders() {
+  public void clear() {
+    bufferList.clear();
     headers.clear();
   }
 
   public Map<String, String> getHeaders() {
     return headers;
   }
-
-  public Map<String, String> getheaders() {
-    // TODO Auto-generated method stub
-    return null;
-  }
-
-  private Long seq;
 
   public AbstractSource getSource() {
     return source;
@@ -101,7 +132,7 @@ public class FileSet implements DirectoryTailHeader {
   }
 
   public Long getSeq() {
-    return ++this.seq;
+    return ++seq;
   }
 
   /*
