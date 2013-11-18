@@ -15,7 +15,7 @@ public class MultiLineParserModule implements Configurable,
     DirectoryTailParserModulable {
   private static final Logger logger = LoggerFactory
       .getLogger(MultiLineParserModule.class);
-  
+
   private static final String CONFIG_FIRST_LINE_PATTERN = "first-line-pattern";
   private Pattern pattern;
   private String patternString;
@@ -28,7 +28,7 @@ public class MultiLineParserModule implements Configurable,
 
   public boolean isFirstLine(String line) {
     Matcher matcher = pattern.matcher(line);
-    
+
     return matcher.find();
   }
 
@@ -36,16 +36,14 @@ public class MultiLineParserModule implements Configurable,
     return false;
   }
 
-  public void configure(Context context)
-  {
+  public void configure(Context context) {
     patternString = context.getString(CONFIG_FIRST_LINE_PATTERN);
-    Preconditions.checkState(patternString != null, "Configuration must specify first-line-pattern.");
-    
-    try
-    {
+    Preconditions.checkState(patternString != null,
+        "Configuration must specify first-line-pattern.");
+
+    try {
       pattern = Pattern.compile(patternString);
-    }catch(PatternSyntaxException e)
-    {
+    } catch (PatternSyntaxException e) {
       Preconditions.checkState(pattern != null, e.getMessage());
       logger.error(e.getMessage(), e);
       return;

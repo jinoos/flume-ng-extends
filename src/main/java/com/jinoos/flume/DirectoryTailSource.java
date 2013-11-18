@@ -1,15 +1,16 @@
 package com.jinoos.flume;
 
 import java.io.IOException;
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
 import java.util.HashMap;
-import java.util.List;
+import java.util.Hashtable;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
@@ -79,8 +80,8 @@ public class DirectoryTailSource extends AbstractSource implements
   private Map<String, DirPattern> pathMap;
 
   private ExecutorService executorService;
-  private ExecRunnable execRunnable;
-  private Future<?> future;
+  private MonitorRunnable monitorRunnable;
+  private Future<?> monitorFuture;
 
   private long keepBufferInterval;
   private long fileMonitorSleepTime;
@@ -88,6 +89,16 @@ public class DirectoryTailSource extends AbstractSource implements
   DirectoryTailParserModulable parserModule;
 
   private DefaultFileMonitor fileMonitor;
+
+  // private static final long eventQueueWorkerTimeoutMiliSecond = 1000;
+  private static final int eventQueueWorkerSize = 10;
+  private static final int maxEventQueueSize = 1000 * 1000;
+  private BlockingQueue<DirectoryTailEvent> eventQueue = new LinkedBlockingQueue<DirectoryTailEvent>(
+      maxEventQueueSize);
+  private Future<?>[] workerFuture = new Future<?>[eventQueueWorkerSize];
+
+  private FileSystemManager fsManager;
+  private Hashtable<String, FileSet> fileSetMap;
 
   /**
    * <PRE>
@@ -156,6 +167,8 @@ public class DirectoryTailSource extends AbstractSource implements
       dir.setFilePattern(pattern);
 
       dirMap.put(confDirArr[i], dir);
+      logger.debug("parsed dirs configure dir : " + confDirArr[i] + ", path : "
+          + path);
     }
 
     String confParserModule = DEFAULT_PARSER_MODULE_CLASS;
@@ -164,6 +177,7 @@ public class DirectoryTailSource extends AbstractSource implements
           DEFAULT_PARSER_MODULE_CLASS);
       parserModule = (DirectoryTailParserModulable) Class.forName(
           confParserModule).newInstance();
+      logger.debug("parserClass : " + confParserModule);
     } catch (ClassNotFoundException e) {
       Preconditions.checkState(false, e.getMessage() + " " + confParserModule);
       logger.error(e.getMessage(), e);
@@ -195,9 +209,66 @@ public class DirectoryTailSource extends AbstractSource implements
       sourceCounter = new SourceCounter(getName());
     }
 
-    executorService = Executors.newSingleThreadExecutor();
-    execRunnable = new ExecRunnable(this);
-    future = executorService.submit(execRunnable);
+    fileSetMap = new Hashtable<String, FileSet>();
+
+    try {
+      fsManager = VFS.getManager();
+    } catch (FileSystemException e) {
+      logger.error(e.getMessage(), e);
+      return;
+    }
+
+    monitorRunnable = new MonitorRunnable();
+
+    fileMonitor = new DefaultFileMonitor(monitorRunnable);
+    fileMonitor.setRecursive(false);
+
+    FileObject fileObject;
+
+    logger.debug("Dirlist count " + dirMap.size());
+    for (Entry<String, DirPattern> entry : dirMap.entrySet()) {
+      logger.debug("Scan dir " + entry.getKey());
+
+      DirPattern dirPattern = entry.getValue();
+
+      try {
+        fileObject = fsManager.resolveFile(dirPattern.getPath());
+      } catch (FileSystemException e) {
+        logger.error(e.getMessage(), e);
+        continue;
+      }
+
+      try {
+        if (!fileObject.isReadable()) {
+          logger.warn("No have readable permission, " + fileObject.getURL());
+          continue;
+        }
+
+        if (FileType.FOLDER != fileObject.getType()) {
+          logger.warn("Not a directory, " + fileObject.getURL());
+          continue;
+        }
+
+        // 폴더를 Monitoring 대상에 추가한다.
+        fileMonitor.addFile(fileObject);
+        logger.debug(fileObject.getName().getPath()
+            + " directory has been add in monitoring list");
+        pathMap.put(fileObject.getName().getPath(), entry.getValue());
+      } catch (FileSystemException e) {
+        logger.warn(e.getMessage(), e);
+        continue;
+      } catch (Exception e) {
+        logger.debug(e.getMessage(), e);
+      }
+
+    }
+
+    executorService = Executors.newFixedThreadPool(eventQueueWorkerSize + 1);
+    monitorFuture = executorService.submit(monitorRunnable);
+
+    for (int i = 0; i < eventQueueWorkerSize; i++) {
+      workerFuture[i] = executorService.submit(new WorkerRunnable(this));
+    }
 
     sourceCounter.start();
     super.start();
@@ -220,107 +291,44 @@ public class DirectoryTailSource extends AbstractSource implements
 
   }
 
-  private class ExecRunnable implements Runnable, FileListener {
-
+  private class WorkerRunnable implements Runnable {
     private AbstractSource source;
-    private FileSystemManager fsManager;
-    private Map<String, FileSet> fileSetMap;
 
-    private ExecRunnable(AbstractSource source) {
+    private WorkerRunnable(AbstractSource source) {
       this.source = source;
-      fileSetMap = new HashMap<String, FileSet>();
     }
 
     public void run() {
-      try {
-        fsManager = VFS.getManager();
-      } catch (FileSystemException e) {
-        logger.error(e.getMessage(), e);
-        return;
-      }
-
-      fileMonitor = new DefaultFileMonitor(this);
-      fileMonitor.setRecursive(false);
-
-      FileObject fileObject;
-
-      logger.debug("Dirlist count " + dirMap.size());
-      for (Entry<String, DirPattern> entry : dirMap.entrySet()) {
-        logger.debug("Scan dir " + entry.getKey());
-
-        DirPattern dirPattern = entry.getValue();
-
-        try {
-          fileObject = fsManager.resolveFile(dirPattern.getPath());
-        } catch (FileSystemException e) {
-          logger.error(e.getMessage(), e);
-          continue;
-        }
-
-        try {
-          if (!fileObject.isReadable()) {
-            logger.warn("No have readable permission, " + fileObject.getURL());
-            continue;
-          }
-
-          if (FileType.FOLDER != fileObject.getType()) {
-            logger.warn("Not a directory, " + fileObject.getURL());
-            continue;
-          }
-
-          // 폴더를 Monitoring 대상에 추가한다.
-          fileMonitor.addFile(fileObject);
-          logger.debug(fileObject.getName().getPath()
-              + " directory has been add in monitoring list");
-          pathMap.put(fileObject.getName().getPath(), entry.getValue());
-
-          // 대상 폴더 하위에 File들은 미리 FileSet Object를 생성하여
-          // BufferedReader의 위치를 맨뒤로 지정해 두는 것이 중요.
-          FileObject[] childrens = fileObject.getChildren();
-
-          for (FileObject child : childrens) {
-            // 모니터링 대상 파일일 경우만 Map에 추가한다.
-            if (FileType.FILE != child.getType()) {
-              logger.debug(child.getName().getPath() + " is not a File.");
-              continue;
-            }
-
-            if (!isInFilePattern(child, dirPattern.getFilePattern())) {
-              logger.debug(child.getName().getPath()
-                  + " is not in file pattern.");
-              continue;
-            }
-
-            try {
-              fileSetMap.put(child.getName().getPath(), new FileSet(source,
-                  child));
-            } catch (IOException e) {
-              logger.error(e.getMessage(), e);
-            }
-          }
-        } catch (FileSystemException e) {
-          logger.warn(e.getMessage(), e);
-          continue;
-        }
-
-      }
-
-      fileMonitor.setDelay(fileMonitorSleepTime);
-      fileMonitor.start();
-
       while (true) {
         try {
-          Thread.sleep(keepBufferInterval);
+          // DirectoryTailEvent event = eventQueue.poll(
+          // eventQueueWorkerTimeoutMiliSecond,
+          // TimeUnit.MILLISECONDS);
+          DirectoryTailEvent event = eventQueue.take();
+
+          if (event == null) {
+            continue;
+          }
+
+          if (event.type == FileEventType.FILE_CHANGED) {
+            fileChanged(event.event);
+          } else if (event.type == FileEventType.FILE_CREATED) {
+            fileCreated(event.event);
+          } else if (event.type == FileEventType.FILE_DELETED) {
+            fileDeleted(event.event);
+          } else if (event.type == FileEventType.FLUSH) {
+            if (event.fileSet != null)
+              sendEvent(event.fileSet);
+          }
         } catch (InterruptedException e) {
           logger.debug(e.getMessage(), e);
+        } catch (FileSystemException e) {
+          logger.info(e.getMessage(), e);
         }
-
-        flushFileSetBuffer();
       }
     }
 
-    // 파일생성을 감지함.
-    public void fileCreated(FileChangeEvent event) throws Exception {
+    private void fileCreated(FileChangeEvent event) throws FileSystemException {
       String path = event.getFile().getName().getPath();
       String dirPath = event.getFile().getParent().getURL().getPath();
 
@@ -343,27 +351,22 @@ public class DirectoryTailSource extends AbstractSource implements
 
       FileSet fileSet;
 
-      synchronized (fileSetMap) {
-        fileSet = fileSetMap.get(event.getFile().getName().getPath());
+      fileSet = fileSetMap.get(event.getFile().getName().getPath());
 
-        if (fileSet == null) {
-          try {
-            logger.info(path
-                + " is not in monitoring list. It's going to be listed.");
-            fileSet = new FileSet(source, event.getFile());
-            fileSetMap.put(path, fileSet);
-          } catch (IOException e) {
-            logger.error(e.getMessage(), e);
-            return;
-          }
+      if (fileSet == null) {
+        try {
+          logger.info(path
+              + " is not in monitoring list. It's going to be listed.");
+          fileSet = new FileSet(source, event.getFile());
+          fileSetMap.put(path, fileSet);
+        } catch (IOException e) {
+          logger.error(e.getMessage(), e);
+          return;
         }
       }
-
-      readMessage(fileSet);
     }
 
-    // 파일 삭제를 감지함.
-    public void fileDeleted(FileChangeEvent event) throws Exception {
+    private void fileDeleted(FileChangeEvent event) throws FileSystemException {
       String path = event.getFile().getName().getPath();
       String dirPath = event.getFile().getParent().getURL().getPath();
 
@@ -381,17 +384,15 @@ public class DirectoryTailSource extends AbstractSource implements
         return;
       }
 
-      synchronized (fileSetMap) {
-        FileSet fileSet = fileSetMap.get(path);
-        if (fileSet != null) {
-          fileSetMap.remove(path);
-          logger.debug("Removed monitoring fileSet.");
-        }
+      FileSet fileSet = fileSetMap.get(path);
+
+      if (fileSet != null) {
+        fileSetMap.remove(path);
+        logger.debug("Removed monitoring fileSet.");
       }
     }
 
-    // 파일 변경을 감지함.
-    public void fileChanged(FileChangeEvent event) throws Exception {
+    private void fileChanged(FileChangeEvent event) throws FileSystemException {
       String path = event.getFile().getName().getPath();
       String dirPath = event.getFile().getParent().getName().getPath();
 
@@ -410,22 +411,20 @@ public class DirectoryTailSource extends AbstractSource implements
         return;
       }
 
-      FileSet fileSet;
+      FileSet fileSet = fileSetMap.get(event.getFile().getName().getPath());
 
-      synchronized (fileSetMap) {
-        fileSet = fileSetMap.get(event.getFile().getName().getPath());
-
-        if (fileSet == null) {
-          logger.warn(path + "is not in monitoring list.");
-          try {
-            fileSet = new FileSet(source, event.getFile());
+      if (fileSet == null) {
+        logger.warn(path + "is not in monitoring list.");
+        try {
+          fileSet = new FileSet(source, event.getFile());
+          synchronized (fileSetMap) {
             fileSetMap.put(path, fileSet);
-          } catch (IOException e) {
-            logger.error(e.getMessage(), e);
-            return;
           }
+        } catch (IOException e) {
+          logger.error(e.getMessage(), e);
           return;
         }
+        return;
       }
 
       readMessage(fileSet);
@@ -445,26 +444,33 @@ public class DirectoryTailSource extends AbstractSource implements
     private void readMessage(FileSet fileSet) {
       try {
         String buffer;
-        while ((buffer = fileSet.readLine()) != null) {
-          buffer += "\n";
-          boolean isFirstLine = parserModule.isFirstLine(buffer);
-          if (isFirstLine) {
-            sendEvent(fileSet);
-            fileSet.appendLine(buffer);
-            parserModule.parse(buffer, fileSet);
 
-          } else {
-            if (fileSet.getLineSize() == 0) {
-              logger.debug("Wrong log format, " + buffer);
+        synchronized (fileSet) {
+
+          while ((buffer = fileSet.readLine()) != null) {
+            if (buffer.length() == 0) {
               continue;
-            } else {
+            }
+
+            boolean isFirstLine = parserModule.isFirstLine(buffer);
+            if (isFirstLine) {
+              sendEvent(fileSet);
               fileSet.appendLine(buffer);
               parserModule.parse(buffer, fileSet);
-            }
-          }
 
-          if (parserModule.isLastLine(buffer)) {
-            sendEvent(fileSet);
+            } else {
+              if (fileSet.getLineSize() == 0) {
+                logger.debug("Wrong log format, " + buffer);
+                continue;
+              } else {
+                fileSet.appendLine(buffer);
+                parserModule.parse(buffer, fileSet);
+              }
+            }
+
+            if (parserModule.isLastLine(buffer)) {
+              sendEvent(fileSet);
+            }
           }
         }
       } catch (IOException e) {
@@ -487,9 +493,59 @@ public class DirectoryTailSource extends AbstractSource implements
       }
     }
 
+  }
+
+  private class MonitorRunnable implements Runnable, FileListener {
+    public void run() {
+
+      fileMonitor.setDelay(fileMonitorSleepTime);
+      fileMonitor.start();
+
+      while (true) {
+        try {
+          Thread.sleep(keepBufferInterval);
+          fileMonitor.run();
+        } catch (InterruptedException e) {
+          logger.debug(e.getMessage(), e);
+        }
+
+        flushFileSetBuffer();
+      }
+    }
+
+    // 파일생성을 감지함.
+    public void fileCreated(FileChangeEvent event) throws Exception {
+      DirectoryTailEvent dtEvent = new DirectoryTailEvent(event,
+          FileEventType.FILE_CREATED);
+      eventQueue.put(dtEvent);
+    }
+
+    // 파일 삭제를 감지함.
+    public void fileDeleted(FileChangeEvent event) throws Exception {
+      DirectoryTailEvent dtEvent = new DirectoryTailEvent(event,
+          FileEventType.FILE_DELETED);
+      eventQueue.put(dtEvent);
+    }
+
+    // 파일 변경을 감지함.
+    public void fileChanged(FileChangeEvent event) throws Exception {
+      DirectoryTailEvent dtEvent = new DirectoryTailEvent(event,
+          FileEventType.FILE_CHANGED);
+      eventQueue.put(dtEvent);
+    }
+
+    public void flush(FileSet fileSet) {
+      DirectoryTailEvent dtEvent = new DirectoryTailEvent(fileSet);
+      try {
+        eventQueue.put(dtEvent);
+      } catch (InterruptedException e) {
+        logger.warn(e.getMessage(), e);
+      }
+    }
+
     private void flushFileSetBuffer() {
       synchronized (fileSetMap) {
-        long cutLine = System.currentTimeMillis() - keepBufferInterval;
+        long cutTime = System.currentTimeMillis() - keepBufferInterval;
 
         for (Map.Entry<String, FileSet> entry : fileSetMap.entrySet()) {
 
@@ -497,12 +553,34 @@ public class DirectoryTailSource extends AbstractSource implements
           // then, the message will be flushed even not be catched
           // new first line or last line. It's to prevent last message
           // delay delevery.
-          if (entry.getValue().getLastAppendTime() < cutLine
-              && entry.getValue().getBufferList().size() > 0) {
-            sendEvent(entry.getValue());
+          if (entry.getValue().getBufferList().size() > 0
+              && entry.getValue().getLastAppendTime() < cutTime) {
+            flush(entry.getValue());
           }
         }
       }
+    }
+  }
+
+  private enum FileEventType {
+    FILE_CREATED, FILE_CHANGED, FILE_DELETED, FLUSH
+  }
+
+  private class DirectoryTailEvent {
+    FileChangeEvent event;
+    FileEventType type;
+    FileSet fileSet;
+
+    public DirectoryTailEvent(FileChangeEvent event, FileEventType type) {
+      this.type = type;
+      this.event = event;
+      this.fileSet = null;
+    }
+
+    public DirectoryTailEvent(FileSet fileSet) {
+      this.type = FileEventType.FLUSH;
+      this.fileSet = fileSet;
+      this.event = null;
     }
   }
 }

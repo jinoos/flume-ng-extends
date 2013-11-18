@@ -2,8 +2,8 @@ package com.jinoos.flume;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileReader;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -12,11 +12,15 @@ import java.util.Map;
 import org.apache.commons.vfs2.FileObject;
 import org.apache.flume.Transaction;
 import org.apache.flume.source.AbstractSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class FileSet {
+  private static final Logger logger = LoggerFactory.getLogger(FileSet.class);
   private AbstractSource source;
   private FileObject fileObject;
   private BufferedReader bufferedReader;
+  private RandomAccessFile rReader;
   private Transaction transaction;
   private List<String> bufferList;
   private Map<String, String> headers;
@@ -27,19 +31,22 @@ public class FileSet {
       throws IOException {
     this.source = source;
     this.fileObject = fileObject;
-    this.bufferedReader = bufferedReader;
+
     this.bufferList = new ArrayList<String>();
-    this.bufferedReader = new BufferedReader(new FileReader(new File(fileObject
-        .getName().getPath())));
-    while (this.bufferedReader.readLine() != null)
-      ;
+
+    File f = new File(fileObject.getName().getPath());
+
+    rReader = new RandomAccessFile(f, "r");
+    rReader.seek(f.length());
+
     bufferList = new ArrayList<String>();
     headers = new HashMap<String, String>();
+    logger.debug("FileSet has been created " + fileObject.getName().getPath());
     this.seq = 0L;
   }
 
   public String readLine() throws IOException {
-    return bufferedReader.readLine();
+    return rReader.readLine();
   }
 
   public long getLastAppendTime() {
