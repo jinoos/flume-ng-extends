@@ -330,7 +330,7 @@ public class DirectoryTailSource extends AbstractSource implements
 
     private void fileCreated(FileChangeEvent event) throws FileSystemException {
       String path = event.getFile().getName().getPath();
-      String dirPath = event.getFile().getParent().getURL().getPath();
+      String dirPath = event.getFile().getParent().getName().getPath();
 
       logger.debug(path + " has been created.");
 
@@ -368,7 +368,7 @@ public class DirectoryTailSource extends AbstractSource implements
 
     private void fileDeleted(FileChangeEvent event) throws FileSystemException {
       String path = event.getFile().getName().getPath();
-      String dirPath = event.getFile().getParent().getURL().getPath();
+      String dirPath = event.getFile().getParent().getName().getPath();
 
       logger.debug(path + " has been deleted.");
 
