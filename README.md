@@ -19,7 +19,7 @@ agent.sources = dirMon
 agent.sources.dirMon.type = com.jinoos.flume.DirectoryTailSource
 agent.sources.dirs = tmpDir varLogDir
 agent.sources.dirs.tmpDir.path = /tmp
-agent.sources.dirs.tmpDir.file-pattern = ^(message)$      # /var/log/message
+agent.sources.dirs.tmpDir.file-pattern = ^(message)$       # /var/log/message
 agent.sources.dirs.varLogDir.path = /var/log
 agent.sources.dirs.varLogDir.file-pattern = ^(.*)(\.log)$  # /tmp/*.log
 ```
