@@ -8,7 +8,7 @@ Configuration
 | Property Name | Default | Description |
 | ------------- | :-----: | :---------- |
 | Channels | - |  |
-| Type | - | - | com.jinoos.flume.DirectoryTailSource |
+| Type | - | com.jinoos.flume.DirectoryTailSource |
 | dirs | - | Nick of directories, it's such as list of what directories are monitored |
 | dirs.NICK.path | - | Directory path |
 | dirs.NICK.file-pattern | - | Pattern of target file(s), ex) '^(.*)$' is for all files |
