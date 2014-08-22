@@ -358,7 +358,10 @@ public class DirectoryTailSource extends AbstractSource implements
           logger.info(path
               + " is not in monitoring list. It's going to be listed.");
           fileSet = new FileSet(source, event.getFile());
-          fileSetMap.put(path, fileSet);
+          //a little synchronized bug here.fixed by tqli,2014-08-07 ,E-mail:tiangang1126@126.com
+          synchronized(fileSetMap){
+            fileSetMap.put(path, fileSet);
+          }
         } catch (IOException e) {
           logger.error(e.getMessage(), e);
           return;
@@ -387,7 +390,10 @@ public class DirectoryTailSource extends AbstractSource implements
       FileSet fileSet = fileSetMap.get(path);
 
       if (fileSet != null) {
-        fileSetMap.remove(path);
+          //a little synchronized bug here.fixed by tqli,2014-08-07,E-mail:tiangang1126@126.com
+          synchronized(fileSetMap){
+            fileSetMap.remove(path);
+          }
         logger.debug("Removed monitoring fileSet.");
       }
     }
